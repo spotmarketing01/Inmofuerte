@@ -1,0 +1,550 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Plus, Search, Home, MapPin, User, Phone, DollarSign, 
+  FileText, Trash2, Copy, Clock, Image as ImageIcon,
+  CheckCircle, Share2, Zap, ArrowLeft, X, AlertCircle,
+  TrendingUp, Building2, Briefcase, Instagram, Layout,
+  Camera, ShieldCheck, Mail, Bed, Bath, Car, Dog, RefreshCw,
+  ExternalLink, Eraser, Save, Sparkles, Box, Download,
+  Cloud, CloudOff, Wand2, Flame, Waves, Dumbbell, Sun, Shirt, Banknote, Folder, FolderOpen
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, collection, addDoc, onSnapshot, doc, 
+  deleteDoc, query, serverTimestamp, setDoc, getDoc 
+} from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+
+// --- CONFIGURACIÓN DE FIREBASE (EDITAR AQUÍ) ---
+// ⚠️ INSTRUCCIONES:
+// 1. Ve a la consola de Firebase > Configuración del Proyecto.
+// 2. Copia tus credenciales.
+// 3. Reemplaza los valores de abajo con los tuyos o pega todo el bloque encima.
+
+const firebaseConfig = {
+  apiKey: "PEGA_TU_API_KEY_AQUI", // Ejemplo: "AIzaSyDOCAbC..."
+  authDomain: "TU_PROYECTO.firebaseapp.com",
+  projectId: "TU_ID_DE_PROYECTO",
+  storageBucket: "TU_PROYECTO.appspot.com",
+  messagingSenderId: "TUS_NUMEROS",
+  appId: "TU_APP_ID"
+};
+
+// -----------------------------------------------
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+// Mantenemos este ID para compatibilidad si ya tenías datos guardados
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'inmofuerte-v4-final';
+
+// --- CONSTANTES ---
+// Tu carpeta maestra de Google Drive
+const MASTER_DRIVE_FOLDER = 'https://drive.google.com/drive/folders/1SnsJbiHeb_4OF7LOOX6kRpw1_cwiO0nf?usp=sharing';
+
+// Datos de Perfil
+const PROFILE_DEFAULT = {
+  name: "Fernando Michel",
+  title: "Agente InmoFUERTE",
+  phone: "73429642",
+  email: "fernando.michel@inmofuerte.com",
+  profilePic: "https://api.dicebear.com/7.x/avataaars/svg?seed=Fernando", 
+};
+
+// --- UTILIDADES ---
+
+// Convierte enlaces de Drive en imágenes visibles
+const getDirectDriveLink = (url) => {
+  if (!url) return '';
+  if (!url.includes('drive.google.com')) return url;
+  const idMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
+  if (idMatch && idMatch[1]) {
+    return `https://lh3.googleusercontent.com/u/0/d/${idMatch[1]}=w1000`;
+  }
+  return url;
+};
+
+// Carga html2canvas bajo demanda
+const loadHtml2Canvas = () => {
+  return new Promise((resolve) => {
+    if (window.html2canvas) return resolve(window.html2canvas);
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+    script.onload = () => resolve(window.html2canvas);
+    document.head.appendChild(script);
+  });
+};
+
+const App = () => {
+  // --- ESTADOS ---
+  const [user, setUser] = useState(null);
+  const [properties, setProperties] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('list'); 
+  const [showFlyer, setShowFlyer] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [dbStatus, setDbStatus] = useState('connecting');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedProperty, setSelectedProperty] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+
+  const flyerRef = useRef(null);
+
+  const initialForm = {
+    agentName: PROFILE_DEFAULT.name,
+    agentPhone: PROFILE_DEFAULT.phone,
+    propertyType: 'Departamento',
+    offerType: 'Venta',
+    location: '',
+    price: '',
+    landArea: '',
+    bedrooms: '',
+    bathrooms: '',
+    garage: 'No',
+    storageRoom: 'No',
+    pets: 'No',
+    // Nuevos Campos v8.0
+    expenses: '',
+    jacuzzi: 'No',
+    bbq: 'No',
+    pool: 'No',
+    gym: 'No',
+    terrace: 'No',
+    laundry: 'No',
+    washingArea: 'No',
+    // Multimedia
+    mainImageUrl: '', 
+    photoFolder: '', // Se deja vacío intencionalmente para forzar el link específico
+    marketingCopy: ''
+  };
+  const [formData, setFormData] = useState(initialForm);
+
+  // --- EFECTOS: AUTH Y DATOS ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) { setDbStatus('error'); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      if (u) setDbStatus('online');
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    setLoading(true);
+    const propsCol = collection(db, 'artifacts', appId, 'public', 'data', 'properties');
+    const q = query(propsCol); 
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setProperties(docs);
+      setLoading(false);
+    }, (err) => { 
+      setLoading(false); 
+      setDbStatus('error');
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- HELPERS ---
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const copyToClipboard = (text) => {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    document.body.appendChild(textArea);
+    textArea.select();
+    try {
+      document.execCommand('copy');
+      showToast("¡Texto copiado!");
+    } catch (err) {
+      showToast("Error al copiar");
+    }
+    document.body.removeChild(textArea);
+  };
+
+  // --- MOTOR IA DE EXTRACCIÓN v8.5 ---
+  const performExtraction = (text) => {
+    if (!text || text.length < 5) {
+      showToast("Primero pega el anuncio (copy)");
+      return;
+    }
+
+    const lower = text.toLowerCase();
+    const updates = {};
+
+    const findMatch = (regexes, isNumeric = true) => {
+      for (const re of regexes) {
+        const m = text.match(re);
+        if (m && m[1]) {
+          return isNumeric ? m[1].replace(/[,. \-a-zA-Z]/g, '').trim() : m[1].trim();
+        }
+      }
+      return null;
+    };
+
+    // Modalidad
+    if (lower.includes('venta') || lower.includes('vende')) updates.offerType = 'Venta';
+    else if (lower.includes('alquiler') || lower.includes('renta')) updates.offerType = 'Alquiler';
+    else if (lower.includes('anticr')) updates.offerType = 'Anticrético';
+
+    // Datos Numéricos
+    updates.price = findMatch([/(?:precio|inversión|inversion|valor|monto|costo|vende)[:\s]*\$?us?\s*([\d,.]+)/i, /\$?\s*([\d,.]+)\s*us/i, /\$?([\d,.]+)\s*(?:dólares|dolares|us)/i, /(?:precio|monto)[:\s]*([\d,.]+)/i]);
+    updates.bedrooms = findMatch([/(\d+)\s*(?:dorm|hab|cuartos|habitaciones|dormitorios)/i, /(?:dorm|hab|dormitorios)[:\s]*(\d+)/i]);
+    updates.bathrooms = findMatch([/(\d+)\s*(?:baño|baños|bano|banos|baths)/i, /(?:baño|baños|bano|banos)[:\s]*(\d+)/i]);
+    updates.expenses = findMatch([/(?:expensas|mantenimiento)[:\s]*(?:bs\.?|bob)?\s*([\d,.]+)/i]);
+    
+    // Ubicación
+    const locMatch = text.match(/(?:ubicado en|zona|calle|avenida|ubicación|ubicacion|sector)[:\s]+([^.\n,]+)/i);
+    if (locMatch) updates.location = locMatch[1].trim();
+    else {
+      const firstLine = text.split('\n')[0].trim();
+      if (firstLine.length < 60 && firstLine.length > 3) updates.location = firstLine;
+    }
+
+    // Amenidades (Detector Booleano)
+    const check = (keywords, negativeKeywords = []) => {
+      const has = keywords.some(k => lower.includes(k));
+      const noHas = negativeKeywords.some(k => lower.includes(k));
+      return has && !noHas ? 'Sí' : 'No';
+    };
+
+    updates.garage = check(['garaje', 'parqueo', 'cochera'], ['sin garaje', 'no incluye garaje']);
+    updates.storageRoom = check(['baulera', 'depósito', 'deposito'], ['sin baulera']);
+    updates.pets = check(['mascota', 'animales'], ['no se aceptan', 'prohibido']);
+    updates.jacuzzi = check(['hidromasaje', 'jacuzzi']);
+    updates.bbq = check(['churrasquero', 'parrillero', 'barbacoa', 'asador']);
+    updates.pool = check(['piscina', 'alberca', 'pileta']);
+    updates.gym = check(['gimnasio', 'gym']);
+    updates.terrace = check(['terraza']);
+    updates.laundry = check(['lavandería', 'lavanderia']);
+    updates.washingArea = check(['área de lavado', 'area de lavado', 'zona de lavado']);
+
+    setFormData(prev => ({ ...prev, ...updates }));
+    showToast("IA: Datos extraídos con éxito");
+  };
+
+  // --- MANEJO DE REGISTROS ---
+  const handleSave = async (e) => {
+    if (e) e.preventDefault();
+    if (!user) return showToast("Conectando...");
+    setIsSubmitting(true);
+    try {
+      const dataToSave = {
+        ...formData,
+        mainImageUrl: getDirectDriveLink(formData.mainImageUrl),
+        createdAt: serverTimestamp(),
+        userId: user.uid
+      };
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'properties'), dataToSave);
+      setFormData(initialForm);
+      setView('list');
+      showToast("¡Registro guardado en la nube!");
+    } catch (err) {
+      showToast("Error al guardar");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteConfirmId) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'properties', deleteConfirmId));
+      setDeleteConfirmId(null);
+      setView('list');
+      showToast("Registro eliminado");
+    } catch (err) { showToast("Error al borrar"); }
+  };
+
+  const handleDownloadFlyer = async () => {
+    const html2canvas = await loadHtml2Canvas();
+    if (flyerRef.current) {
+      showToast("Generando imagen HD...");
+      html2canvas(flyerRef.current, { useCORS: true, scale: 2, backgroundColor: '#000' }).then(canvas => {
+        const link = document.createElement('a');
+        link.download = `Flyer-${selectedProperty.location}.png`;
+        link.href = canvas.toDataURL();
+        link.click();
+        showToast("¡Descarga iniciada!");
+      });
+    }
+  };
+
+  const filtered = useMemo(() => {
+    const term = searchTerm.toLowerCase().trim();
+    return properties.filter(p => {
+      const searchPool = [p.location, p.agentName, p.price, p.propertyType].map(f => (f || '').toString().toLowerCase()).join(' ');
+      return term === '' || searchPool.includes(term);
+    });
+  }, [properties, searchTerm]);
+
+  // --- FLYER DINÁMICO ---
+  const FlyerTemplate = ({ property }) => {
+    const imageUrl = getDirectDriveLink(property.mainImageUrl);
+    
+    const features = [
+      { show: true, icon: Bed, val: `${property.bedrooms || 0} Dorm.` },
+      { show: true, icon: Bath, val: `${property.bathrooms || 0} Baños` },
+      { show: property.garage === 'Sí', icon: Car, val: 'Garaje' },
+      { show: property.storageRoom === 'Sí', icon: Box, val: 'Baulera' },
+      { show: property.pool === 'Sí', icon: Waves, val: 'Piscina' },
+      { show: property.bbq === 'Sí', icon: Flame, val: 'Parrillero' },
+      { show: property.jacuzzi === 'Sí', icon: Waves, val: 'Jacuzzi' },
+      { show: property.gym === 'Sí', icon: Dumbbell, val: 'Gimnasio' },
+      { show: property.terrace === 'Sí', icon: Sun, val: 'Terraza' },
+      { show: property.laundry === 'Sí', icon: Shirt, val: 'Lavandería' },
+      { show: property.expenses, icon: Banknote, val: `Exp: ${property.expenses}Bs` },
+    ].filter(f => f.show).slice(0, 8); 
+
+    return (
+      <div ref={flyerRef} className="relative w-full aspect-square bg-zinc-950 overflow-hidden border-[10px] border-zinc-900 rounded-[2.5rem] shadow-2xl flex flex-col font-sans">
+        <div className="absolute inset-0 z-0">
+          {imageUrl ? (
+            <img src={imageUrl} className="w-full h-full object-cover opacity-80" alt="Inmueble" crossOrigin="anonymous" />
+          ) : (
+            <div className="w-full h-full bg-zinc-900 flex items-center justify-center"><Building2 className="w-32 h-32 text-zinc-800 animate-pulse" /></div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent" />
+        </div>
+        <div className="relative z-10 p-10 flex justify-between items-start">
+          <div className="flex items-center gap-4">
+             <div className="w-14 h-14 bg-red-600 rounded-2xl flex items-center justify-center text-white shadow-2xl"><Building2 className="w-8 h-8" /></div>
+             <div><h4 className="text-white font-black italic text-3xl leading-none uppercase">INMO<span className="text-red-600">FUERTE</span></h4></div>
+          </div>
+          <div className="bg-red-600 text-white px-5 py-2 rounded-full font-black text-[11px] uppercase italic tracking-widest">{property.offerType}</div>
+        </div>
+        <div className="relative z-10 flex-1 flex flex-col justify-end p-12 pb-8">
+          <h2 className="text-white text-6xl font-black italic uppercase leading-none mb-8 drop-shadow-[0_5px_15px_rgba(0,0,0,1)]">{property.location}</h2>
+          <div className="flex flex-wrap gap-3 mb-6">
+             {features.map((item, idx) => (
+               <div key={idx} className="bg-white/10 backdrop-blur-md border border-white/20 px-4 py-2 rounded-xl flex items-center gap-2">
+                  <item.icon className="w-4 h-4 text-red-500" /> <span className="text-white font-black text-[10px] uppercase">{item.val}</span>
+               </div>
+             ))}
+          </div>
+        </div>
+        <div className="relative z-10 bg-white p-10 flex items-center justify-between border-t-8 border-red-600">
+           <div>
+              <p className="text-zinc-500 font-black text-[11px] uppercase mb-1 italic">Inversión Final</p>
+              <div className="flex items-baseline gap-1">
+                 <span className="text-red-600 text-3xl font-black italic">$us</span>
+                 <span className="text-black font-black text-6xl tracking-tighter leading-none">{Number(property.price).toLocaleString()}</span>
+              </div>
+           </div>
+           <div className="text-right border-l-2 border-zinc-100 pl-10">
+              <p className="text-black font-black text-2xl italic leading-none uppercase">{PROFILE_DEFAULT.name}</p>
+              <p className="text-red-600 font-bold text-[11px] uppercase mt-2">Agente Elite</p>
+              <p className="text-zinc-900 font-black text-xl mt-3 italic">{PROFILE_DEFAULT.phone}</p>
+           </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-28 font-sans selection:bg-red-600">
+      {toast && <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] bg-red-600 text-white px-8 py-4 rounded-2xl shadow-2xl font-bold text-sm animate-bounce flex items-center gap-3"><Zap className="w-5 h-5" /> {toast}</div>}
+      
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-[200] bg-black/95 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
+           <div className="bg-zinc-900 border border-red-600/30 p-10 rounded-[3rem] max-w-sm text-center shadow-2xl">
+              <AlertCircle className="w-20 h-20 text-red-600 mx-auto mb-6" />
+              <h3 className="text-2xl font-black italic uppercase text-white mb-3">¿Borrar Activo?</h3>
+              <div className="flex gap-4">
+                 <button onClick={() => setDeleteConfirmId(null)} className="flex-1 py-4 text-zinc-500 font-black uppercase text-[10px]">Cancelar</button>
+                 <button onClick={handleDelete} className="flex-[2] py-4 bg-red-600 text-white rounded-2xl font-black uppercase text-[10px] shadow-xl">Eliminar</button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      <header className="bg-zinc-950/80 backdrop-blur-xl border-b border-white/5 p-6 sticky top-0 z-50">
+        <div className="max-w-5xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-4 cursor-pointer" onClick={() => setView('list')}>
+            <div className="bg-red-600 p-2.5 rounded-xl text-white shadow-lg"><Building2 className="w-6 h-6" /></div>
+            <div>
+              <h1 className="text-xl font-black tracking-tighter italic uppercase leading-none">INMO<span className="text-red-600">FUERTE</span></h1>
+              <p className="text-[9px] uppercase tracking-[0.4em] font-bold text-zinc-500 mt-1.5 flex items-center gap-2 italic">
+                {dbStatus === 'online' ? <Cloud className="w-3 h-3 text-emerald-500" /> : <CloudOff className="w-3 h-3 text-red-500" />}
+                Cloud v8.5
+              </p>
+            </div>
+          </div>
+          <button onClick={() => { setFormData(initialForm); setView('add'); }} className="bg-white text-black px-6 py-2.5 rounded-xl font-black text-[10px] uppercase hover:bg-red-600 hover:text-white transition-all shadow-xl italic tracking-widest">Nuevo Registro</button>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto p-4 md:p-8">
+        {view === 'list' && (
+          <div className="space-y-8 animate-in fade-in duration-500">
+            <div className="relative group flex items-center">
+              <div className="absolute left-6 text-zinc-600 z-10"><Search className="w-5 h-5" /></div>
+              <input type="text" placeholder="Buscar por zona, agente o precio..." className="w-full pl-16 pr-24 py-6 rounded-2xl bg-zinc-900/40 border border-white/5 outline-none focus:border-red-600 transition-all font-medium text-zinc-200 shadow-2xl" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+              <div className="absolute right-4 flex gap-2">
+                 {searchTerm && <button onClick={() => setSearchTerm('')} className="p-2 text-zinc-600 hover:text-white"><X className="w-5 h-5" /></button>}
+                 <button className="bg-red-600 p-3 rounded-xl shadow-lg"><Search className="w-4 h-4 text-white" /></button>
+              </div>
+            </div>
+            {loading ? (
+              <div className="text-center py-32"><RefreshCw className="w-10 h-10 text-red-600 animate-spin mx-auto" /></div>
+            ) : filtered.length === 0 ? (
+              <div className="text-center py-24 bg-zinc-900/20 rounded-[3rem] border border-white/5 border-dashed"><p className="text-zinc-600 font-black text-[10px] uppercase tracking-widest italic">Sin registros</p></div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {filtered.map(p => (
+                  <div key={p.id} onClick={() => { setSelectedProperty(p); setView('detail'); }} className="bg-zinc-900/30 rounded-[2.5rem] border border-white/5 hover:border-red-600/40 transition-all hover:-translate-y-1 shadow-xl p-8 cursor-pointer group">
+                    <div className="flex justify-between items-start mb-6">
+                      <span className="text-red-500 font-black text-[9px] uppercase tracking-widest italic">{p.offerType}</span>
+                      <p className="text-white font-black text-2xl tracking-tighter italic"><span className="text-red-600 text-sm mr-1">$us</span>{Number(p.price).toLocaleString()}</p>
+                    </div>
+                    <h3 className="font-black text-white text-lg mb-4 uppercase italic group-hover:text-red-500 transition-colors line-clamp-2">{p.location}</h3>
+                    <div className="flex items-center gap-3 text-zinc-600 text-[9px] font-bold uppercase mt-4 italic"><Layout className="w-3 h-3 text-red-600" /> {p.propertyType}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {view === 'add' && (
+          <div className="bg-zinc-950 rounded-[3.5rem] border border-white/5 p-8 md:p-14 animate-in slide-in-from-bottom-10 max-w-4xl mx-auto shadow-2xl relative">
+             <div className="mb-12">
+                <h2 className="text-2xl font-black italic uppercase">Alta <span className="text-red-600">Elite</span></h2>
+                <p className="text-zinc-600 text-[10px] uppercase font-bold tracking-[0.3em] mt-3 italic">Incluye amenidades extra</p>
+             </div>
+             
+             <div className="space-y-10">
+                <div className="space-y-4">
+                   <div className="flex justify-between items-center px-2">
+                      <label className="text-[11px] font-black text-red-500 uppercase tracking-[0.2em] italic flex items-center gap-2 animate-pulse"><Sparkles className="w-5 h-5" /> PASO 1: COPY</label>
+                      <button type="button" onClick={() => performExtraction(formData.marketingCopy)} className="bg-red-600 text-white px-8 py-2.5 rounded-xl text-[10px] font-black uppercase italic hover:bg-red-700 transition-all flex items-center gap-2 shadow-xl shadow-red-600/30 active:scale-95"><Wand2 className="w-4 h-4" /> Rellenar</button>
+                   </div>
+                   <textarea className="w-full p-8 rounded-[2.5rem] bg-black border border-red-600/20 text-zinc-300 font-mono text-[14px] leading-relaxed focus:border-red-600 outline-none shadow-2xl min-h-[200px]" placeholder="Pega el anuncio..." value={formData.marketingCopy} onChange={(e) => setFormData({ ...formData, marketingCopy: e.target.value })} />
+                </div>
+
+                <div className="h-px bg-white/5" />
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in">
+                   <div className="md:col-span-2 space-y-2"><label className="text-[9px] font-black text-zinc-600 uppercase ml-2">Ubicación</label><input required className="w-full p-4 rounded-xl bg-black border border-white/5 text-white font-bold text-sm focus:border-red-600 outline-none" value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} /></div>
+                   <div className="space-y-2"><label className="text-[9px] font-black text-zinc-600 uppercase ml-2">Modalidad</label><select className="w-full p-4 rounded-xl bg-black border border-white/5 text-white font-bold text-sm focus:border-red-600" value={formData.offerType} onChange={e => setFormData({...formData, offerType: e.target.value})}><option>Venta</option><option>Alquiler</option><option>Anticrético</option></select></div>
+                   <div className="space-y-2"><label className="text-[9px] font-black text-red-500 uppercase ml-2 italic">Precio ($us)</label><input required type="number" className="w-full p-4 rounded-xl bg-black border border-white/5 text-white font-black text-lg focus:border-red-600" value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} /></div>
+                   <div className="space-y-2"><label className="text-[9px] font-black text-zinc-600 uppercase ml-2">Dormitorios</label><input type="number" className="w-full p-4 rounded-xl bg-black border border-white/5 text-white font-bold text-sm" value={formData.bedrooms} onChange={e => setFormData({...formData, bedrooms: e.target.value})} /></div>
+                   <div className="space-y-2"><label className="text-[9px] font-black text-zinc-600 uppercase ml-2">Baños</label><input type="number" className="w-full p-4 rounded-xl bg-black border border-white/5 text-white font-bold text-sm" value={formData.bathrooms} onChange={e => setFormData({...formData, bathrooms: e.target.value})} /></div>
+                   <div className="space-y-2"><label className="text-[9px] font-black text-zinc-600 uppercase ml-2">Expensas (Bs)</label><input className="w-full p-4 rounded-xl bg-black border border-white/5 text-white font-bold text-sm" value={formData.expenses} onChange={e => setFormData({...formData, expenses: e.target.value})} /></div>
+                   
+                   {/* SECCIÓN AMENIDADES */}
+                   <div className="md:col-span-3 grid grid-cols-2 md:grid-cols-4 gap-4 bg-zinc-900/50 p-6 rounded-3xl border border-white/5">
+                      {['garage', 'storageRoom', 'pets', 'jacuzzi', 'bbq', 'pool', 'gym', 'terrace', 'laundry', 'washingArea'].map(field => (
+                        <div key={field} className="space-y-2">
+                          <label className="text-[9px] font-black text-zinc-500 uppercase ml-1">{field.replace(/([A-Z])/g, ' $1').trim()}</label>
+                          <select className="w-full p-3 rounded-xl bg-black border border-white/10 text-white text-xs" value={formData[field]} onChange={e => setFormData({...formData, [field]: e.target.value})}><option>Sí</option><option>No</option></select>
+                        </div>
+                      ))}
+                   </div>
+
+                   {/* SECCIÓN MULTIMEDIA */}
+                   <div className="md:col-span-3 grid grid-cols-1 md:grid-cols-2 gap-6 bg-zinc-900 p-6 rounded-3xl border border-white/5">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-red-500 uppercase ml-2 italic flex items-center gap-2"><ImageIcon className="w-4 h-4"/> Foto Portada (Para el Flyer)</label>
+                        <input className="w-full p-4 rounded-xl bg-black border border-white/10 text-white text-xs focus:border-red-600 outline-none shadow-xl" placeholder="Pega el link de la mejor foto..." value={formData.mainImageUrl} onChange={e => setFormData({...formData, mainImageUrl: e.target.value})} />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-emerald-500 uppercase ml-2 italic flex items-center gap-2"><Folder className="w-4 h-4"/> Enlace Carpeta Fotos (Google Drive)</label>
+                        <input className="w-full p-4 rounded-xl bg-black border border-white/10 text-emerald-400 text-xs focus:border-emerald-600 outline-none shadow-xl" placeholder="Link de la carpeta de esta propiedad..." value={formData.photoFolder} onChange={e => setFormData({...formData, photoFolder: e.target.value})} />
+                      </div>
+                   </div>
+                </div>
+                <div className="md:col-span-3 flex gap-4 pt-6">
+                   <button type="button" onClick={() => setView('list')} className="flex-1 text-zinc-600 font-black uppercase text-[10px] italic">Cerrar</button>
+                   <button type="button" onClick={handleSave} disabled={isSubmitting} className="flex-[2] py-5 bg-red-600 rounded-2xl font-black text-white uppercase text-[10px] tracking-widest shadow-2xl flex items-center justify-center gap-3 active:scale-95 transition-all italic tracking-[0.2em]">
+                     {isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Publicar
+                   </button>
+                </div>
+             </div>
+          </div>
+        )}
+
+        {view === 'detail' && selectedProperty && (
+          <div className="animate-in zoom-in duration-500 max-w-4xl mx-auto space-y-8 pb-10">
+            <div className="bg-zinc-950 rounded-[4rem] border border-white/5 overflow-hidden shadow-2xl">
+              <div className="bg-gradient-to-br from-red-600 to-red-900 p-12 md:p-20 text-white relative text-center">
+                <button onClick={() => { setView('list'); setShowFlyer(false); }} className="absolute top-10 left-10 bg-black/30 p-4 rounded-2xl hover:bg-black/50 transition-all shadow-lg"><ArrowLeft className="w-6 h-6" /></button>
+                <h2 className="text-4xl md:text-7xl font-black mb-8 italic uppercase tracking-tighter leading-none italic">{selectedProperty.location}</h2>
+                <div className="bg-black/50 inline-block px-12 py-6 rounded-[2.5rem] border border-white/10 shadow-2xl">
+                   <span className="font-black text-4xl md:text-6xl tracking-tighter italic"><span className="text-red-400 text-xl mr-3 italic">$us</span>{Number(selectedProperty.price).toLocaleString()}</span>
+                </div>
+              </div>
+
+              <div className="p-10 md:p-16 space-y-12">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                  <button onClick={() => setShowFlyer(!showFlyer)} className={`flex items-center justify-center gap-3 py-6 rounded-2xl font-black uppercase text-xs transition-all shadow-xl ${showFlyer ? 'bg-white text-black' : 'bg-red-600 text-white'}`}><Sparkles className="w-5 h-5" /> {showFlyer ? 'Ocultar Flyer' : 'Generar Flyer IA'}</button>
+                  {showFlyer && <button onClick={handleDownloadFlyer} className="flex items-center justify-center gap-3 py-6 rounded-2xl bg-emerald-600 text-white font-black uppercase text-xs hover:bg-emerald-700 shadow-xl"><Download className="w-5 h-5" /> Descargar PNG</button>}
+                  <button onClick={() => copyToClipboard(selectedProperty.marketingCopy)} className="flex items-center justify-center gap-3 py-6 rounded-2xl bg-zinc-900 text-zinc-100 border border-white/10 font-black uppercase text-xs hover:bg-zinc-800 transition-all"><Copy className="w-5 h-5" /> Copiar Copy</button>
+                </div>
+
+                {showFlyer && <div className="animate-in slide-in-from-top-10 duration-700 rounded-[2.5rem] shadow-2xl"><FlyerTemplate property={selectedProperty} /></div>}
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                  {[{ label: 'Dorm.', val: selectedProperty.bedrooms, icon: Bed }, { label: 'Baños', val: selectedProperty.bathrooms, icon: Bath }, { label: 'Baulera', val: selectedProperty.storageRoom, icon: Box }, { label: 'Garaje', val: selectedProperty.garage, icon: Car }].map((item, i) => (
+                    <div key={i} className="bg-zinc-900/40 p-8 rounded-[2.5rem] border border-white/5 flex flex-col items-center shadow-lg group hover:border-red-600/30">
+                      <item.icon className="w-7 h-7 text-red-600 mb-4 group-hover:scale-110 transition-transform" />
+                      <p className="text-[10px] text-zinc-600 font-black uppercase mb-1 tracking-widest">{item.label}</p>
+                      <p className="font-black text-white text-base italic">{item.val || 'N/A'}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="bg-zinc-900/50 rounded-[3rem] p-12 border border-white/5 italic leading-relaxed text-zinc-300 text-lg whitespace-pre-wrap border-l-[12px] border-red-600 pl-10">
+                  {selectedProperty.marketingCopy}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {selectedProperty.photoFolder && (
+                    <button onClick={() => window.open(selectedProperty.photoFolder, '_blank')} className="flex items-center justify-center gap-4 py-8 rounded-[2.5rem] bg-emerald-600 text-white font-black uppercase text-[10px] tracking-widest shadow-xl shadow-emerald-900/20 hover:bg-emerald-500 transition-all"><FolderOpen className="w-6 h-6" /> Ver Carpeta de Fotos</button>
+                  )}
+                  <button onClick={() => setDeleteConfirmId(selectedProperty.id)} className="py-8 text-zinc-800 hover:text-red-500 font-black uppercase text-[9px] transition-colors italic">Borrar Registro</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {view === 'profile' && (
+          <div className="animate-in zoom-in duration-500 max-w-2xl mx-auto bg-zinc-950 rounded-[4rem] border border-white/5 shadow-2xl overflow-hidden pb-16">
+            <div className="h-48 bg-gradient-to-r from-red-600 to-red-900" />
+            <div className="px-12 text-center -mt-20 relative">
+               <div className="w-40 h-40 rounded-3xl border-[6px] border-zinc-950 mx-auto overflow-hidden shadow-2xl bg-zinc-800 rotate-3 transition-transform hover:rotate-0"><img src={PROFILE_DEFAULT.profilePic} className="w-full h-full object-cover" alt="Fernando" crossOrigin="anonymous" /></div>
+               <h2 className="text-4xl font-black italic uppercase text-white mt-8">{PROFILE_DEFAULT.name}</h2>
+               <p className="text-red-500 font-black text-xs uppercase tracking-[0.4em] mt-3 mb-10 italic">{PROFILE_DEFAULT.title}</p>
+               
+               <button onClick={() => window.open(MASTER_DRIVE_FOLDER, '_blank')} className="w-full mb-4 bg-zinc-100 text-black px-8 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest italic hover:bg-emerald-600 hover:text-white transition-all shadow-xl flex items-center justify-center gap-3"><FolderOpen className="w-5 h-5" /> Abrir Nube Maestra Drive</button>
+               <button onClick={() => setView('list')} className="w-full bg-zinc-900 text-white px-8 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest italic hover:bg-red-600 transition-all shadow-xl">Volver al Inventario</button>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <nav className="fixed bottom-10 left-1/2 -translate-x-1/2 bg-zinc-950/80 backdrop-blur-3xl border border-white/10 p-4 flex gap-12 items-center z-50 rounded-[3rem] shadow-[0_30px_100px_rgba(0,0,0,1)]">
+        <button onClick={() => { setView('list'); setShowFlyer(false); }} className={`p-5 rounded-full transition-all duration-500 ${view === 'list' ? 'bg-red-600 text-white shadow-lg scale-125 -translate-y-4' : 'text-zinc-600 hover:text-white'}`}><Home className="w-7 h-7" /></button>
+        <button onClick={() => { setFormData(initialForm); setView('add'); }} className={`p-5 rounded-full transition-all duration-500 ${view === 'add' ? 'bg-red-600 text-white shadow-lg scale-125 -translate-y-4' : 'text-zinc-600'}`}><Plus className="w-7 h-7" /></button>
+        <button onClick={() => setView('profile')} className={`p-5 rounded-full transition-all duration-500 ${view === 'profile' ? 'bg-red-600 text-white shadow-lg scale-125 -translate-y-4' : 'text-zinc-600 hover:text-white'}`}><User className="w-7 h-7" /></button>
+      </nav>
+    </div>
+  );
+};
+
+export default App;
